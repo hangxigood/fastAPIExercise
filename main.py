@@ -131,6 +131,24 @@ async def update_student(student_id: str, student: StudentCreate, db: Session = 
         logger.error(f"Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
+@app.delete("/student/{student_id}", status_code=200)
+async def delete_student(student_id: str, db: Session = Depends(get_db)):
+    try:
+        db_student = db.query(StudentDB).filter(StudentDB.studentID == student_id).first()
+        if not db_student:
+            return JSONResponse(
+                status_code=404,
+                content={"message": "Student not found"}
+            )
+        
+        db.delete(db_student)
+        db.commit()
+        return {"message": "Student deleted successfully"}
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred.")
+
 
 # Global exception handler
 @app.exception_handler(Exception)
