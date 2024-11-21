@@ -6,8 +6,8 @@ from sqlalchemy import create_engine, Column, String, Date
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
-from pydantic import BaseModel, ValidationError
-from datetime import date
+from pydantic import BaseModel, ValidationError, validator
+from datetime import datetime, date
 import logging
 import pymysql
 
@@ -40,8 +40,8 @@ class StudentDB(Base):
 
     studentID = Column(String(50), primary_key=True, index=True)
     studentName = Column(String(100))
-    course = Column(String(50))
-    presentDate = Column(Date)
+    courseName = Column(String(50))
+    Date = Column(Date)
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -52,8 +52,17 @@ app = FastAPI()
 class StudentCreate(BaseModel):
     studentID: str
     studentName: str
-    course: str
-    presentDate: date
+    courseName: str
+    Date: date
+
+    @validator('Date', pre=True)
+    def parse_date(cls, value):
+        if isinstance(value, str):
+            try:
+                return datetime.strptime(value, "%d/%m/%Y").date()
+            except ValueError:
+                raise ValueError("Date must be in DD/MM/YYYY format")
+        return value
 
 # Dependency to get database session
 def get_db():
@@ -149,6 +158,28 @@ async def delete_student(student_id: str, db: Session = Depends(get_db)):
         logger.error(f"Unexpected error: {str(e)}")
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
+@app.get("/students", status_code=200)
+async def get_students(db: Session = Depends(get_db)):
+    try:
+        students = db.query(StudentDB).all()
+        return students
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred.")
+
+@app.get("/student/{student_id}", status_code=200)
+async def get_student(student_id: str, db: Session = Depends(get_db)):
+    try:
+        student = db.query(StudentDB).filter(StudentDB.studentID == student_id).first()
+        if not student:
+            return JSONResponse(
+                status_code=404,
+                content={"message": "Student not found"}
+            )
+        return student
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
 # Global exception handler
 @app.exception_handler(Exception)
