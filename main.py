@@ -1,17 +1,29 @@
 import os
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Depends, Request
+from fastapi import FastAPI, HTTPException, Depends, Request, status, Security
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse
-from sqlalchemy import create_engine, Column, String, Date
+from sqlalchemy import create_engine, Column, String, Date, Boolean
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError, IntegrityError
-from pydantic import BaseModel, ValidationError, validator
-from datetime import datetime, date
+from pydantic import BaseModel, ValidationError, validator, EmailStr
+from datetime import datetime, date, timedelta
+from typing import Optional
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 import logging
 import pymysql
 
 pymysql.install_as_MySQLdb()
+
+# Dependency to get database session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -43,6 +55,15 @@ class StudentDB(Base):
     courseName = Column(String(50))
     Date = Column(Date)
 
+# User database model
+class UserDB(Base):
+    __tablename__ = "users"
+    
+    username = Column(String(50), primary_key=True, index=True)
+    email = Column(String(100), unique=True, index=True)
+    hashed_password = Column(String(100))
+    is_active = Column(Boolean, default=True)
+
 # Create tables
 Base.metadata.create_all(bind=engine)
 
@@ -64,13 +85,80 @@ class StudentCreate(BaseModel):
                 raise ValueError("Date must be in DD/MM/YYYY format")
         return value
 
-# Dependency to get database session
-def get_db():
-    db = SessionLocal()
+# User Pydantic models
+class UserBase(BaseModel):
+    username: str
+    email: EmailStr
+
+class UserCreate(UserBase):
+    password: str
+
+class User(UserBase):
+    is_active: bool
+
+    class Config:
+        orm_mode = True
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+
+# JWT Settings
+SECRET_KEY = os.getenv("SECRET_KEY")
+ALGORITHM = os.getenv("ALGORITHM")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
+
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+# Password and token functions
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password):
+    return pwd_context.hash(password)
+
+def get_user(db: Session, username: str):
+    return db.query(UserDB).filter(UserDB.username == username).first()
+
+def authenticate_user(db: Session, username: str, password: str):
+    user = get_user(db, username)
+    if not user or not verify_password(password, user.hashed_password):
+        return False
+    return user
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
     try:
-        yield db
-    finally:
-        db.close()
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+        token_data = TokenData(username=username)
+    except JWTError:
+        raise credentials_exception
+    user = get_user(db, username=token_data.username)
+    if user is None:
+        raise credentials_exception
+    return user
 
 # Exception handler for SQLAlchemy errors
 @app.exception_handler(SQLAlchemyError)
@@ -90,8 +178,50 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
         content={"message": "Invalid input data.", "details": exc.errors()}
     )
 
+# New authentication endpoints
+@app.post("/register", response_model=User)
+async def register_user(user: UserCreate, db: Session = Depends(get_db)):
+    db_user = get_user(db, username=user.username)
+    if db_user:
+        raise HTTPException(
+            status_code=400,
+            detail="Username already registered"
+        )
+    hashed_password = get_password_hash(user.password)
+    db_user = UserDB(
+        username=user.username,
+        email=user.email,
+        hashed_password=hashed_password
+    )
+    db.add(db_user)
+    db.commit()
+    db.refresh(db_user)
+    return db_user
+
+@app.post("/token", response_model=Token)
+async def login_for_access_token(
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db)
+):
+    user = authenticate_user(db, form_data.username, form_data.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    access_token = create_access_token(
+        data={"sub": user.username}, expires_delta=access_token_expires
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
 @app.post("/student", status_code=201)
-async def create_student(student: StudentCreate, db: Session = Depends(get_db)):
+async def create_student(
+    student: StudentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     try:
         db_student = db.query(StudentDB).filter(StudentDB.studentID == student.studentID).first()
         if db_student:
@@ -116,7 +246,12 @@ async def create_student(student: StudentCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
 @app.put("/student/{student_id}", status_code=200)
-async def update_student(student_id: str, student: StudentCreate, db: Session = Depends(get_db)):
+async def update_student(
+    student_id: str,
+    student: StudentCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     try:
         db_student = db.query(StudentDB).filter(StudentDB.studentID == student_id).first()
         if not db_student:
@@ -141,7 +276,11 @@ async def update_student(student_id: str, student: StudentCreate, db: Session = 
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
 @app.delete("/student/{student_id}", status_code=200)
-async def delete_student(student_id: str, db: Session = Depends(get_db)):
+async def delete_student(
+    student_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     try:
         db_student = db.query(StudentDB).filter(StudentDB.studentID == student_id).first()
         if not db_student:
@@ -159,7 +298,10 @@ async def delete_student(student_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
 @app.get("/students", status_code=200)
-async def get_students(db: Session = Depends(get_db)):
+async def get_students(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     try:
         students = db.query(StudentDB).all()
         return students
@@ -168,7 +310,11 @@ async def get_students(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="An unexpected error occurred.")
 
 @app.get("/student/{student_id}", status_code=200)
-async def get_student(student_id: str, db: Session = Depends(get_db)):
+async def get_student(
+    student_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     try:
         student = db.query(StudentDB).filter(StudentDB.studentID == student_id).first()
         if not student:
