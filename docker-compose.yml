@@ -13,6 +13,11 @@ services:
       - DATABASE_USER=${DB_USER}
       - DATABASE_PASSWORD=${DB_PASSWORD}
       - DATABASE_NAME=${DB_NAME}
+    cap_add:
+      - NET_ADMIN
+    privileged: true
+    networks:
+      - rate-limited-network
     # command: uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 
   # web2:
@@ -37,9 +42,15 @@ services:
       MYSQL_DATABASE: ${DB_NAME}
     ports:
       - "3306:3306"
+    networks:
+      - rate-limited-network
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD}"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
+
+networks:
+  rate-limited-network:
+    driver: bridge
