@@ -18,6 +18,20 @@ services:
     privileged: true
     networks:
       - rate-limited-network
+    # Security configurations
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    deploy:
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
     # command: uvicorn main:app --host 0.0.0.0 --port 8080 --reload
 
   # web2:
@@ -44,6 +58,17 @@ services:
       - "3306:3306"
     networks:
       - rate-limited-network
+    # Security configurations for database
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_PASSWORD}"]
       interval: 10s
@@ -54,3 +79,5 @@ services:
 networks:
   rate-limited-network:
     driver: bridge
+    driver_opts:
+      encrypted: "true"
